@@ -287,8 +287,15 @@ int run(vktest::Device& d, const VkPhysicalDeviceMemoryProperties& memory, const
     EXPECT(set.ok());
     const std::uint32_t capacity = set.image_capacity(dimension);
     std::printf("%s: %u indices in the set\n", name(dimension), capacity);
-    // Every live image needs an index, and index 0 is the fallback.
-    EXPECT(capacity > live_images);
+    // Every live image needs an index, and index 0 is the fallback. The sampled limits checked in main() can allow
+    // far more than the set the device accepts: MoltenVK reports 1,000,000 update-after-bind sampled images, but its
+    // vkGetDescriptorSetLayoutSupport refuses a set above maxPerSetDescriptors (1212), so size_bindings keeps the
+    // default 256 1D indices there. Then the device holds fewer images of this dimension, and the test says so.
+    if (capacity <= live_images) {
+        std::printf("unsupported: the set this device accepts holds %u %s indices, too few for %u images\n", capacity,
+                    name(dimension), live_images);
+        return 77;
+    }
 
     Images images(d);
     EXPECT(images.make(dimension, live_images, max_layers, memory));
@@ -407,14 +414,19 @@ int main() {
     const std::vector<std::uint32_t> code = load_spirv(LEONIDA_TEST_BINDLESS_DIMENSIONS_SPV);
     EXPECT(!code.empty());
     const std::uint32_t max_layers = properties.properties.limits.maxImageArrayLayers;
+    bool skipped = false;
     for (const ImageDimension dimension :
-         {ImageDimension::dim_1d, ImageDimension::dim_2d_array, ImageDimension::dim_3d})
-        EXPECT(run(d, memory, features, max_layers, code, dimension) == 0);
+         {ImageDimension::dim_1d, ImageDimension::dim_2d_array, ImageDimension::dim_3d}) {
+        const int result = run(d, memory, features, max_layers, code, dimension);
+        if (result == 77) skipped = true;
+        else EXPECT(result == 0);
+    }
 
     if (d.validation_errors()) {
         std::printf("%u validation errors\n", d.validation_errors());
         return 1;
     }
+    if (skipped) return 77;  // the dimensions that fit passed; the others were too small to test
     std::printf("vk_bindless_dimensions: ok\n");
     return 0;
 #endif
