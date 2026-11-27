@@ -2816,6 +2816,24 @@ Pipeline creation:
   A root signature the runtime does not know is hashed by its address, so the key of a pipeline made with one can
   change from one run to the next. The file is local, like the cache files, and is not meant to be attached to a
   report: quote the counts. It changes no build, order or cache.
+  `LEONIDA_PIPELINE_PREWARM_ORDER=<file>` reads such a log at boot and builds, ahead of their first draw, the graphics
+  and mesh pipelines an earlier run asked for first (RT-PIPELINE-PREWARM-ORDER, phase 2; `runtime/src/pipeline_prewarm.h`).
+  `1` names `pipeline_order.log` beside the session cache; it is read before this run's own record is appended, so
+  both variables can be on together. Of the runs recorded on this GPU (vendor and device id), the one with the most
+  records is read, the newest on a tie. When the title creates a PSO whose key is in it, each recorded variant is
+  queued on the compile workers as a warm-up at its recorded rank: after every demanded build, one warm-up at a time
+  and none while a demanded build runs (`PipelineCompiler`; the compile-gate finding in "Compile workers" below is
+  why), ahead of the compute warm-up's size order and before the cache checkpoint. A variant 0 built at create is
+  skipped. A console stream kept for its first bind (`LEONIDA_PIPELINE_COMPILE=on-demand`) is otherwise parsed only
+  there, which would leave the prewarm no lead: when its pipeline is in the plan, the parse is queued as its first
+  prewarm job instead (at the rank of its first recorded variant, on a compile worker), and its variants follow with
+  their ranks. A bind that comes first waits for that parse, which it would otherwise have done itself. Records are taken in order until their recorded build times add up to
+  `LEONIDA_PIPELINE_PREWARM_BUDGET_MS` (default 300000; a record with no build time counts 1000 ms), and at most
+  `LEONIDA_PIPELINE_PREWARM_MAX_ENTRIES` (default 4096). Compute records are left to the compute warm-up and to
+  `gta6rt --precompile-pipelines`. A missing or unreadable file, a file with no readable record and a file from
+  another GPU are ignored with one `[rt] pipeline-prewarm:` line; a damaged line is skipped, as are line types a v1
+  reader does not know (`E`). A queued prewarm holds no reference: a PSO released first drops it. One that is already
+  running when the title submits still holds the compile gate (`LEONIDA_COMPILE_GATE`), as any warm-up does.
   A queued build holds no reference to its PSO or device (`PipelineCompiler`, `runtime/shims/d3d12_pipeline_compile.h`).
   A PSO's last release drops its queued builds and returns at once; one already running is left to finish, and the
   worker deletes the PSO after it (`PipelineState::last_release`). The PSO's device reference goes at the release, so
@@ -2932,6 +2950,17 @@ submitting thread; at the maintainers' decision it was replaced by this one when
   still goes through the compile gate and `LargeModuleGate` as before, so a smaller one a submission waits for can
   queue behind it there; `async_pipeline_size_test` covers the decision and `d3d12_m4_compute_async_small_waits` a
   submission whose two pipelines are under the threshold with the worker held (both dispatches run).
+  `LEONIDA_ASYNC_MIN_BYTES_GRAPHICS=<n>` gives graphics and mesh pipelines (all their stages) a threshold of their
+  own; unset, they take `LEONIDA_ASYNC_MIN_BYTES`, as before the variable, and compute always does. `0` makes every
+  graphics pipeline asynchronous, as `LEONIDA_ASYNC_PIPELINES=1` did on its own. The reason: @MoonEyes's thread dumps
+  (RTX 4060, `LEONIDA_ASYNC_MIN_BYTES=1048576`) showed the draw thread building lazy graphics variants under 1 MiB in
+  place (`PipelineState::variant` -> `build` -> `vkCreateGraphicsPipelines`, 2.5-11 s each, back to back), so no
+  present came for about 100 s. A graphics pipeline that is not built yet costs one skipped draw, while the image
+  needs the small lighting and post compute programs, so graphics can stay asynchronous while those are built where
+  they are needed. One startup line states both thresholds. `d3d12_pipeline_workers_async_graphics_zero` holds the
+  compile worker with compute over its threshold and graphics at `0`: every dispatch runs, every draw is skipped, and
+  the draws come once the worker is let go; `d3d12_pipeline_workers_async_graphics_unset` checks that graphics follow
+  `LEONIDA_ASYNC_MIN_BYTES` without the variable.
 - **Warm-ups while the title submits.** A compute warm-up holds the compile gate for its whole create, and every
   submission waits behind it: a native boot's submissions waited 140 s in all at the gate behind compute warm-ups, and
   past the story load the worker went through 694 warm-ups of modules over 128 KiB (those over 640 KiB take 4-25 s

@@ -53,6 +53,7 @@
 #include "../src/pipeline_cache_store.h"
 #include "../src/pipeline_cache_journal.h"
 #include "../src/pipeline_order.h"
+#include "../src/pipeline_prewarm.h"
 #include "../src/large_module_gate.h"
 #include "../src/dev_status.h"
 #include "../src/conservative_raster.h"
@@ -447,10 +448,17 @@ public:
         // A page the title wrote since it was last copied holds the newer bytes already: its GPU result is dropped and
         // the refresh's own copy carries the title's. So is a page whose mapping changed, one a kernel write may be
         // filling, and one xmem maps at another address too (a write there is seen by no guard and no watch here).
-        const auto held = [&](std::size_t i) {
+        // Decided for every page before the first copy: a copy below can fault on another guard, and the handler then
+        // reopens the whole 64 KiB tile here on this thread (reopen_range), which clears kClean and kProtected there.
+        // Read live, that made the later runs in the tile count as written by the title, and their GPU results were
+        // dropped from a batch already taken off the queue. A page the title wrote before this point is held still.
+        const std::size_t p0 = (from - first_) / kPage, p1 = (to - first_ + kPage - 1) / kPage;
+        held_pages_.resize(p1 - p0);
+        for (std::size_t i = p0; i < p1; ++i) {
             const std::uint8_t s = state_[i];
-            return (s & (kZero | kRequery | kPinned | kAliased)) || (!(s & kProtected) && !(s & kClean));
-        };
+            held_pages_[i - p0] = (s & (kZero | kRequery | kPinned | kAliased)) || (!(s & kProtected) && !(s & kClean));
+        }
+        const auto held = [&](std::size_t i) { return held_pages_[i - p0] != 0; };
         constexpr std::uintptr_t kPiece = 256;  // compared and copied in pieces this size
         std::size_t written = 0;
         for (std::uintptr_t at = from & ~(kPage - 1); at < ((to + kPage - 1) & ~(kPage - 1));) {
@@ -1416,6 +1424,7 @@ private:
     std::uintptr_t first_ = 0, last_ = 0;  // the pages covered
     SRWLOCK lock_ = SRWLOCK_INIT;          // state_, cover_, the targets, and the protection of the pages
     std::atomic<DWORD> writer_{0};         // the thread in write_back, which holds lock_ while it copies into the title
+    Vector<std::uint8_t> held_pages_;      // write_back's per-page decision, taken before its copies (under lock_)
     Vector<std::uint8_t> state_;           // per 4 KiB page
     Vector<std::uint32_t> cover_;          // per 4 KiB page: the targets that read it
     Vector<Target> targets_;               // by start
@@ -2726,6 +2735,41 @@ struct DeviceState {
     // LEONIDA_PIPELINE_ORDER_LOG=1: which pipelines the title asks for first, appended to pipeline_order.log beside the
     // session cache (pipeline_order.h). Null when off: the pipelines then carry no hook at all.
     std::unique_ptr<leonida::pipeline_order::Recorder> order_log;
+    // LEONIDA_PIPELINE_PREWARM_ORDER=<file> ("1": pipeline_order.log beside the session cache): the graphics pipelines an
+    // earlier run asked for first, queued as warm-ups in that order when the title creates them (pipeline_prewarm.h).
+    // Null when off. Read before start_order_log, which appends this run to the same file when both are on.
+    std::unique_ptr<const leonida::pipeline_prewarm::Plan> prewarm_plan;
+    void load_prewarm_plan() {
+        namespace prewarm = leonida::pipeline_prewarm;
+        wchar_t value[1024]{};
+        const DWORD n = GetEnvironmentVariableW(L"LEONIDA_PIPELINE_PREWARM_ORDER", value, DWORD(std::size(value)));
+        if (n == 0 || n >= std::size(value) || (n == 1 && value[0] == L'0')) return;
+        try {
+            std::filesystem::path path = value;
+            if (n == 1 && value[0] == L'1') {
+                path = pipeline_cache_session_path();
+                if (path.empty()) {
+                    std::fprintf(stderr, "[rt] pipeline-prewarm: no session cache folder; nothing is prewarmed\n");
+                    return;
+                }
+                path.replace_filename(L"pipeline_order.log");
+            }
+            const auto count = [](const char* name, std::uint64_t fallback) {
+                char text[32]{};
+                const DWORD m = GetEnvironmentVariableA(name, text, sizeof(text));
+                return prewarm::parse_count(m > 0 && m < sizeof(text) ? text : nullptr, fallback);
+            };
+            prewarm::Options options;
+            options.budget_ms = count("LEONIDA_PIPELINE_PREWARM_BUDGET_MS", prewarm::default_budget_ms);
+            options.max_entries = std::size_t(count("LEONIDA_PIPELINE_PREWARM_MAX_ENTRIES", prewarm::default_max_entries));
+            auto plan = prewarm::load_plan(path, pso_identity.vendor, pso_identity.device, options);
+            std::fprintf(stderr, "%s\n", plan.message.c_str());
+            if (plan) prewarm_plan = std::make_unique<const prewarm::Plan>(std::move(plan));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[rt] pipeline-prewarm: the order log could not be read (%s); nothing is prewarmed\n",
+                         e.what());
+        }
+    }
     void start_order_log() {
         char text[8]{};
         const DWORD n = GetEnvironmentVariableA("LEONIDA_PIPELINE_ORDER_LOG", text, sizeof(text));
@@ -12456,8 +12500,9 @@ public:
             // A cache-only create that the driver would have to compile stays null: the first draw builds it.
             if (!graphics_.pipeline && !(cache_only && compile_status == VK_PIPELINE_COMPILE_REQUIRED)) return E_FAIL;
         }  // lazy: graphics_.pipeline stays null and the first draw builds it as variant 0
-        // LEONIDA_ASYNC_MIN_BYTES: a pipeline smaller than that (all its stages) is built where a draw needs it.
-        graphics_.async_build = async_replay_compile(spirv_bytes);
+        // LEONIDA_ASYNC_MIN_BYTES_GRAPHICS (unset: LEONIDA_ASYNC_MIN_BYTES): a pipeline smaller than that (all its
+        // stages) is built where a draw needs it.
+        graphics_.async_build = async_replay_compile(true, spirv_bytes);
         graphics_.variant = [this](std::uint32_t unbound) {
             return replay_pipeline("draw", [&] {
                 return graphics_.async_build ? queue_build(false, unbound) : variant(unbound, "draw");
@@ -12513,6 +12558,7 @@ public:
         }
         registered_ = true;
         is_graphics_ = true;
+        prewarm_queue(std::size_t((std::max)(spirv_bytes, std::uint64_t{1})));
         return S_OK;
     }
 
@@ -12625,7 +12671,7 @@ public:
             pipeline_.build_context = this;
         } else if (lazy_compute) {
             // LEONIDA_ASYNC_MIN_BYTES: a module smaller than that is built where a dispatch needs it.
-            pipeline_.async_build = async_replay_compile(spirv_bytes);
+            pipeline_.async_build = async_replay_compile(false, spirv_bytes);
             pipeline_.build = [](void* self) {
                 auto* pso = static_cast<PipelineState*>(self);
                 return replay_pipeline("dispatch", [&] {
@@ -12778,7 +12824,9 @@ private:
     // handle once built; otherwise a compile-worker job is queued (once) and null answered, so the draw or dispatch is
     // skipped and a later submission uses the pipeline. `warm_bytes`: a warm-up, queued by module size. `count_skip`:
     // false for a request made at record time (request_early), which skips nothing.
-    VkPipeline queue_build(bool compute, std::uint32_t unbound, std::size_t warm_bytes = 0, bool count_skip = true) {
+    // `priority`: where a warm-up goes among the others (PipelineCompiler); 0: by `warm_bytes`, the module size.
+    VkPipeline queue_build(bool compute, std::uint32_t unbound, std::size_t warm_bytes = 0, bool count_skip = true,
+                           std::size_t priority = 0) {
         static std::mutex publication;  // ready handles only; no compiler call holds this lock
         const bool warm = warm_bytes != 0;
         // After an exit stop (stop_pipeline_compiles) nothing is queued: a warm-up or an early request is skipped,
@@ -12797,7 +12845,7 @@ private:
         }
         bool queued = false;
         try {
-            queued = PipelineCompiler::instance().submit(compile_owner(), &device_, warm_bytes,
+            queued = PipelineCompiler::instance().submit(compile_owner(), &device_, warm && priority ? priority : warm_bytes,
                                                          [this, compute, warm, unbound, warm_bytes] {
                 // A big warm-up while the title submits is left to the pipeline's first use (warmup_waits_for_quiet).
                 if (warm && warmup_waits_for_quiet(warm_bytes)) return;
@@ -12839,7 +12887,42 @@ private:
         return VK_NULL_HANDLE;
     }
 
+    // LEONIDA_PIPELINE_PREWARM_ORDER: the variants an earlier run asked this graphics pipeline for, queued as warm-ups at
+    // their recorded rank (pipeline_prewarm.h): after every demanded build, one warm-up at a time and none while a
+    // demanded build runs (PipelineCompiler). A queued one holds no reference: a release first drops it (last_release).
+    void prewarm_queue(std::size_t bytes) {
+        const auto* plan = device_.prewarm_plan.get();
+        if (!plan) return;
+        const auto& key = order_key_.empty() ? cache_key_ : order_key_;
+        const auto* entries = key.empty() ? nullptr : plan->find(key);
+        if (!entries) return;
+        for (const auto& entry : *entries) {
+            if (entry.variant == 0 && graphics_.pipeline) continue;  // built at create
+            queue_build(false, entry.variant, bytes, true, leonida::pipeline_prewarm::priority(entry.rank));
+        }
+    }
+
 public:
+    // A console stream kept for its first bind (LEONIDA_PIPELINE_COMPILE=on-demand, set_pending_stream) is parsed only
+    // when it is first resolved, and create_graphics queues the prewarm from there: no lead at all. When the plan has
+    // the stream's pipeline, the parse is queued here as its first prewarm job instead, at the rank of its first
+    // recorded variant, on a compile worker rather than the title's thread; create_graphics then queues the variants
+    // with their ranks as for any other PSO. A bind meanwhile waits for that parse (resolve_type's call_once), which it
+    // would otherwise have done itself. Like any queued build it holds no reference (last_release drops it).
+    void prewarm_pending_stream() {
+        const auto* plan = device_.prewarm_plan.get();
+        if (!plan || pending_stream_kind_ != 1) return;
+        const auto& key = order_key_.empty() ? cache_key_ : order_key_;
+        const auto* entries = key.empty() ? nullptr : plan->find(key);
+        if (!entries || entries->empty()) return;
+        try {
+            PipelineCompiler::instance().submit(compile_owner(), &device_,
+                                                leonida::pipeline_prewarm::priority(entries->front().rank),
+                                                [this] { resolve_type(true); }, true);
+        } catch (...) {
+        }
+    }
+
     // Record time (SetPipelineState for compute, a draw for graphics, with the render-target slots it binds and
     // whether it binds a depth buffer): asynchronous builds start on the compile worker before the list is submitted.
     // Never waits; nothing to do when the variant is the last one asked for here.
@@ -14611,6 +14694,7 @@ public:
                 state_.pso_identity.device = props.deviceID;
                 state_.pso_identity.driver = props.driverVersion;
                 std::memcpy(state_.pso_identity.cache_uuid, props.pipelineCacheUUID, VK_UUID_SIZE);
+                state_.load_prewarm_plan();  // first: the order log may append this run to the same file
                 state_.start_order_log();
                 if (state_.info.max_push_constants_size == 0) {
                     state_.info.max_push_constants_size = props.limits.maxPushConstantsSize;
@@ -15615,9 +15699,10 @@ public:
         auto* pipeline=new PipelineState(state_);
         pipeline->attach_device(identity());
         pipeline->set_cache_key(stream.has_cs?pipeline_key(stream.compute):pipeline_key(stream.graphics));
-        if(state_.order_log) pipeline->set_order_key(order_key(stream));
+        if(state_.order_log||state_.prewarm_plan) pipeline->set_order_key(order_key(stream));
         if(!rt::d3d12_xs::attach_pso_record(pipeline,std::move(record))){pipeline->Release();return E_OUTOFMEMORY;}
         pipeline->set_pending_stream(stream.has_cs);
+        pipeline->prewarm_pending_stream();
         return hand_out(pipeline,iid,out);
     }
     HRESULT shared_native_graphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& pc, D3D12_SHADER_BYTECODE mesh,
@@ -17853,7 +17938,7 @@ public:
         if (FAILED(parsed)) return finish(parsed);
         auto* pipeline = new PipelineState(state_);
         pipeline->attach_device(identity());
-        if (state_.order_log) pipeline->set_order_key(order_key(stream));
+        if (state_.order_log || state_.prewarm_plan) pipeline->set_order_key(order_key(stream));
         const HRESULT hr = stream.has_cs ? pipeline->create_compute(stream.compute)
                                          : pipeline->create_graphics(stream.graphics, &stream.ms, &stream.as,
                                                                      stream.back_masks ? &stream.back_stencil : nullptr, stream.depth_bounds);

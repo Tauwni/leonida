@@ -38,28 +38,44 @@ inline bool async_replay_compile() {
 
 // LEONIDA_ASYNC_MIN_BYTES=<n> (with LEONIDA_ASYNC_PIPELINES=1): only pipelines with n bytes of SPIR-V or more are built
 // asynchronously; a smaller one is built where it is needed, as with asynchronous builds off. Unset or 0: every
-// pipeline, as before the variable (src/async_pipeline_size.h).
-inline std::uint64_t async_min_bytes() {
-    static const std::uint64_t bytes = [] {
-        char text[32]{};
-        const DWORD n = GetEnvironmentVariableA("LEONIDA_ASYNC_MIN_BYTES", text, sizeof(text));
-        bool valid = n < sizeof(text);
-        const std::uint64_t value = valid ? leonida::async_pipelines::parse_min_bytes(text, &valid) : 0;
-        if (!valid)
+// pipeline, as before the variable (src/async_pipeline_size.h). LEONIDA_ASYNC_MIN_BYTES_GRAPHICS=<n> gives graphics and
+// mesh pipelines their own threshold (0: every one asynchronous); unset, they take LEONIDA_ASYNC_MIN_BYTES's.
+inline const leonida::async_pipelines::MinBytes& async_min_bytes() {
+    static const leonida::async_pipelines::MinBytes thresholds = [] {
+        // Text of a variable, or null when it is unset or empty; `valid` false when it is too long to be a number.
+        const auto read = [](const char* name, char (&text)[32], bool& valid) -> const char* {
+            const DWORD n = GetEnvironmentVariableA(name, text, sizeof(text));
+            valid = n < sizeof(text);
+            return valid && n ? text : nullptr;
+        };
+        char all_text[32]{}, graphics_text[32]{};
+        bool all_fits = true, graphics_fits = true, all_valid = true, graphics_valid = true;
+        const char* all = read("LEONIDA_ASYNC_MIN_BYTES", all_text, all_fits);
+        const char* graphics = read("LEONIDA_ASYNC_MIN_BYTES_GRAPHICS", graphics_text, graphics_fits);
+        // Text that is not a number counts as unset: 0 for LEONIDA_ASYNC_MIN_BYTES, compute's for the graphics one.
+        const auto value = leonida::async_pipelines::parse_thresholds(all, graphics, &all_valid, &graphics_valid);
+        if (!all_fits || !all_valid)
             std::fprintf(stderr, "[rt] d3d12: LEONIDA_ASYNC_MIN_BYTES: not a number of bytes, ignored (every "
                                  "asynchronous pipeline stays asynchronous)\n");
-        else if (value && async_replay_compile())
-            std::fprintf(stderr, "[rt] d3d12: LEONIDA_ASYNC_MIN_BYTES: pipelines under %llu bytes of SPIR-V are built "
-                                 "where they are needed; larger ones asynchronously\n", (unsigned long long)value);
+        if (!graphics_fits || !graphics_valid)
+            std::fprintf(stderr, "[rt] d3d12: LEONIDA_ASYNC_MIN_BYTES_GRAPHICS: not a number of bytes, ignored "
+                                 "(graphics pipelines take LEONIDA_ASYNC_MIN_BYTES)\n");
+        if ((value.compute || value.graphics_set) && async_replay_compile())
+            std::fprintf(stderr, "[rt] d3d12: LEONIDA_ASYNC_MIN_BYTES: compute pipelines under %llu bytes of SPIR-V and "
+                                 "graphics pipelines under %llu (%s) are built where they are needed; larger ones "
+                                 "asynchronously (0: every one)\n",
+                         (unsigned long long)value.compute, (unsigned long long)value.graphics,
+                         value.graphics_set ? "LEONIDA_ASYNC_MIN_BYTES_GRAPHICS"
+                                            : "LEONIDA_ASYNC_MIN_BYTES_GRAPHICS unset, the same");
         return value;
     }();
-    return bytes;
+    return thresholds;
 }
 
-// Whether a pipeline of `spirv_bytes` (compute: its module; graphics: all its stages) is built asynchronously.
-inline bool async_replay_compile(std::uint64_t spirv_bytes) {
+// Whether a pipeline of `spirv_bytes` (compute: its module; graphics and mesh: all its stages) is built asynchronously.
+inline bool async_replay_compile(bool graphics, std::uint64_t spirv_bytes) {
     return async_replay_compile() &&
-           leonida::async_pipelines::asynchronous(true, async_min_bytes(), spirv_bytes);
+           leonida::async_pipelines::asynchronous(true, async_min_bytes(), graphics, spirv_bytes);
 }
 
 // LOCAL FIX (post-load stalls): LEONIDA_FAST_PIPELINES=graphics, compute, or all (1 = all) creates those pipelines with

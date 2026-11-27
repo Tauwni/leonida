@@ -882,14 +882,14 @@ if(BUILD_TESTING)
   add_executable(pipeline_cache_store_test test/pipeline_cache_store_test.cpp)
   add_test(NAME pipeline_cache_store COMMAND pipeline_cache_store_test)
 
+  add_executable(heavy_pipeline_cache_test test/heavy_pipeline_cache_test.cpp)
+  add_test(NAME heavy_pipeline_cache COMMAND heavy_pipeline_cache_test)
+
   # RT-PIPELINE-PREWARM-ORDER phase 1: the file format and the recorder of src/pipeline_order.h (pure stdlib, no GPU).
   add_executable(pipeline_order_test test/pipeline_order_test.cpp)
   target_link_libraries(pipeline_order_test PRIVATE Threads::Threads)
   add_test(NAME pipeline_order COMMAND pipeline_order_test)
   set_tests_properties(pipeline_order PROPERTIES TIMEOUT 120)
-
-  add_executable(heavy_pipeline_cache_test test/heavy_pipeline_cache_test.cpp)
-  add_test(NAME heavy_pipeline_cache COMMAND heavy_pipeline_cache_test)
 
   # The per-pipeline journal files compute pipelines are kept in: naming, header check, atomic replacement.
   add_executable(pipeline_cache_journal_test test/pipeline_cache_journal_test.cpp)
@@ -909,7 +909,7 @@ if(BUILD_TESTING)
   add_executable(xdxr_build_output_test test/xdxr_build_output_test.cpp)
   add_test(NAME xdxr_build_output COMMAND xdxr_build_output_test)
 
-  # Which pipelines LEONIDA_ASYNC_PIPELINES=1 builds asynchronously by size (LEONIDA_ASYNC_MIN_BYTES,
+  # Which pipelines LEONIDA_ASYNC_PIPELINES=1 builds asynchronously by size (LEONIDA_ASYNC_MIN_BYTES and _GRAPHICS,
   # src/async_pipeline_size.h): pure stdlib.
   add_executable(async_pipeline_size_test test/async_pipeline_size_test.cpp)
   add_test(NAME async_pipeline_size COMMAND async_pipeline_size_test)
@@ -2625,6 +2625,14 @@ if(TARGET Vulkan::Headers)
     target_compile_options(d3d12_compile_pool_test PRIVATE /W4 /permissive- /utf-8)
     add_test(NAME d3d12_compile_pool COMMAND d3d12_compile_pool_test)
     set_tests_properties(d3d12_compile_pool PROPERTIES TIMEOUT 120)
+    # RT-PIPELINE-PREWARM-ORDER phase 2: the plan read from an order log (src/pipeline_prewarm.h) and its warm-ups on the
+    # compile workers, with jobs that wait at gates; no device.
+    add_executable(pipeline_prewarm_test test/pipeline_prewarm_test.cpp)
+    target_link_libraries(pipeline_prewarm_test PRIVATE gta6rt_d3d12_com)
+    target_compile_definitions(pipeline_prewarm_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(pipeline_prewarm_test PRIVATE /W4 /permissive- /utf-8)
+    add_test(NAME pipeline_prewarm COMMAND pipeline_prewarm_test)
+    set_tests_properties(pipeline_prewarm PROPERTIES TIMEOUT 120)
     add_executable(d3d12_pipeline_workers_test test/d3d12_pipeline_workers_test.cpp)
     target_link_libraries(d3d12_pipeline_workers_test PRIVATE gta6rt_d3d12_com)
     target_compile_definitions(d3d12_pipeline_workers_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -2637,6 +2645,13 @@ if(TARGET Vulkan::Headers)
     set_tests_properties(d3d12_pipeline_workers PROPERTIES ENVIRONMENT "LEONIDA_SERIAL_BIG_COMPILES=1")
     set_tests_properties(d3d12_pipeline_workers_eager PROPERTIES
                          ENVIRONMENT "LEONIDA_LAZY_PIPELINES=0;LEONIDA_LAZY_COMPUTE=0;LEONIDA_SERIAL_BIG_COMPILES=1")
+    # LEONIDA_ASYNC_PIPELINES=1 with LEONIDA_ASYNC_MIN_BYTES over every module and the compile worker held: with
+    # LEONIDA_ASYNC_MIN_BYTES_GRAPHICS=0 the draws are skipped while every dispatch builds its pipeline in place; unset,
+    # the draws build theirs in place too (src/async_pipeline_size.h).
+    add_test(NAME d3d12_pipeline_workers_async_graphics_zero COMMAND d3d12_pipeline_workers_test --async-graphics-zero)
+    add_test(NAME d3d12_pipeline_workers_async_graphics_unset COMMAND d3d12_pipeline_workers_test --async-graphics-unset)
+    set_tests_properties(d3d12_pipeline_workers_async_graphics_zero d3d12_pipeline_workers_async_graphics_unset
+                         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
     # Large pipelines compiled within a memory budget, with real large compute modules: the same values for each setting
     # (read once for each process). 260 MiB holds three of the modules, 1 MiB none. The modules' compile runs on the test's
     # threads, so they get the loader's stack (docs/pipeline_check.md, "Stack reserve").
@@ -3988,6 +4003,9 @@ if(TARGET Vulkan::Headers)
       # handler asks the tracker whose copy faulted too, which must not take its lock again on that thread (#2418).
       add_test(NAME d3d12_title_window_write_back_fault COMMAND d3d12_title_va_test --window-writeback-fault)
       set_tests_properties(d3d12_title_window_write_back_fault PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+      # The same fault with a later run of the write-back in the tile it reopened: that run's GPU words go back too.
+      add_test(NAME d3d12_title_window_write_back_fault_tile COMMAND d3d12_title_va_test --window-writeback-fault-tile)
+      set_tests_properties(d3d12_title_window_write_back_fault_tile PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
       # The same return copy for a slot-133 buffer's shadow (the write-back of a compute result the title reads again).
       add_test(NAME d3d12_placed_write_back COMMAND d3d12_title_va_test --placed-writeback)
       set_tests_properties(d3d12_placed_write_back PROPERTIES SKIP_RETURN_CODE 77)
