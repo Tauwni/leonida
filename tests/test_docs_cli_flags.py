@@ -21,13 +21,15 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FLAG = re.compile(r"(?<![\w-])(--[a-z][\w-]*)")
 SOURCE_SUFFIXES = (".py", ".ps1", ".cpp", ".cc", ".c", ".h", ".hpp", ".cmake", ".txt", ".cs", ".cjs", ".js", ".html",
-                   ".bat", ".sh", ".yml", ".yaml", ".csproj")
+                   ".bat", ".sh", ".yml", ".yaml", ".csproj", ".rs")
 # Flags of other programs the docs quote: gh (AGENTS.md), pip (docs/shader_validation.md), argparse itself, and
 # the spirv-opt passes docs/embedded_shaders.md tried on one module.
 FOREIGN = {"--search", "--state", "--index-url", "--help",
            "--strip-components", "--override-channels",
            "--ssa-rewrite", "--eliminate-dead-code-aggressive", "--eliminate-dead-branches", "--merge-blocks",
-           "--cfg-cleanup", "--merge-return", "--scalar-replacement"}
+           "--cfg-cleanup", "--merge-return", "--scalar-replacement",
+           # git filter-repo (d3d12/docs/asset-policy.md); VIctory's own switches at 64bd58f5f (docs/port_plan.md)
+           "--invert-paths", "--no-rt", "--rt-static-bvh"}
 # Pages that quote another project's tree (SCARAB, americas-recomp).
 OTHER_PROJECTS = {"docs/fssm_crosscheck.md", "docs/d3d12_xs_surface.md"}
 COMMAND = re.compile(r"\bpython3?(?: -I)? ((?:tools|scripts)/[\w/]+\.py|make_game\.py)\b")
@@ -36,6 +38,10 @@ PS1_COMMAND = re.compile(
     re.IGNORECASE
 )
 PS1_FLAG = re.compile(r"(?<![\w-])(-[a-zA-Z][\w-]*)")
+# A clap option in the Rust tree (d3d12/): `#[arg(long)]` names it after the field below it (`one_submit` is
+# `--one-submit`), `#[arg(long = "name")]` spells it out. The flag text itself appears nowhere in the source.
+CLAP_LONG = re.compile(r'#\[(?:arg|clap)\(([^\]]*?)\)\]\s*(?:///[^\n]*\n\s*|#\[[^\]]*\]\s*)*(?:pub(?:\([\w:]+\))?\s+)?(\w+)\s*:')
+CLAP_NAMED = re.compile(r'\blong\s*=\s*"([\w-]+)"')
 
 
 def tracked_files():
@@ -127,6 +133,17 @@ def extract_ps1_params(content):
         if vars_found:
             params.add(vars_found[-1].lower())
     return params
+
+
+def clap_flags(src):
+    """The `--flag` spellings clap derives from the `#[arg(long ...)]` fields of a Rust source, one per line."""
+    out = []
+    for args, field in CLAP_LONG.findall(src):
+        if not re.search(r"\blong\b", args):
+            continue
+        named = CLAP_NAMED.search(args)
+        out.append("--" + (named.group(1) if named else field.replace("_", "-")))
+    return "\n".join(out)
 
 
 def unknown_flags(pages, code):
@@ -243,9 +260,17 @@ class DocsCliFlags(unittest.TestCase):
         ps1_sources = {"scripts/test.ps1": "param([string]$ValidParam)"}
         self.assertEqual(ps1_flag_mismatches(ps1_pages, ps1_sources), [("docs/b.md:2", "scripts/test.ps1", "-BadParam")])
 
+    def test_clap_fields_name_their_flags(self):
+        src = ("    /// Loops.\n    #[arg(long, default_value_t = 5)]\n    loops: u32,\n"
+               "    #[arg(long)]\n    pub one_submit: bool,\n"
+               "    #[arg(long = \"shaders-b\")]\n    other: Option<String>,\n"
+               "    #[arg(short)]\n    quiet: bool,\n")
+        self.assertEqual(clap_flags(src).split("\n"), ["--loops", "--one-submit", "--shaders-b"])
+
     def test_docs_name_existing_flags(self):
         files = tracked_files()
         code = "\n".join(read(p) for p in files if p.endswith(SOURCE_SUFFIXES) and not p.startswith("docs/"))
+        code += "\n" + "\n".join(clap_flags(read(p)) for p in files if p.endswith(".rs"))
         pages = {p: read(p) for p in files if p.endswith(".md") and p not in OTHER_PROJECTS}
         self.assertTrue(code and pages)
         missing = unknown_flags(pages, code)
