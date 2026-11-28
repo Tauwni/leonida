@@ -12,9 +12,25 @@ struct Folder {
     bool create(const char* tag) {
         auto candidate = fs::temp_directory_path() / (std::string("leonida-sparse-") + tag + "-" +
             std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
+        // The process user by SID rather than OW (OWNER RIGHTS): Wine refuses CreateDirectoryW with an OW-only
+        // DACL (ERROR_ACCESS_DENIED), and on Windows the creator is that user either way.
+        std::wstring user = L"OW";
+        HANDLE token = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            alignas(TOKEN_USER) unsigned char buf[256];
+            DWORD len = 0;
+            LPWSTR sid = nullptr;
+            if (GetTokenInformation(token, TokenUser, buf, sizeof(buf), &len) &&
+                ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf)->User.Sid, &sid)) {
+                user = sid;
+                LocalFree(sid);
+            }
+            CloseHandle(token);
+        }
+        const std::wstring sddl = L"D:P(A;OICI;FA;;;" + user + L")(A;OICI;FA;;;SY)";
         PSECURITY_DESCRIPTOR sd = nullptr;
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)",
-                                                                  SDDL_REVISION_1, &sd, nullptr)) return false;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr))
+            return false;
         SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
         const bool fresh = CreateDirectoryW(candidate.c_str(), &sa) != FALSE;
         LocalFree(sd);
