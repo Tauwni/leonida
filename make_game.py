@@ -1310,7 +1310,7 @@ def read_translation_index(index: str) -> dict:
     with open(index, encoding="utf-8-sig") as f:
         shaders = json.load(f)
     if not isinstance(shaders, dict):
-        raise ValueError("expected a JSON object keyed by shader name")
+        raise ValueError("must contain a JSON object keyed by shader name")
     return shaders
 
 
