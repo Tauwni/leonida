@@ -70,10 +70,21 @@ class CvtF16Int16OutputMods(unittest.TestCase):
         self.assertEqual(words[0], 0x0000FFFE)  # -2 clamped to +0.0 in WORD_1, WORD_0 preserved
         self.assertEqual(words[1], 0x00003C00)  # 2 clamped to 1.0 in WORD_0, WORD_1 padded with 0
 
-    def test_f16_to_int16_output_modifiers_still_rejected(self):
+    def test_f16_to_int16_output_modifiers_are_no_ops(self):
+        # Measured on RDNA2 (3cc3c6c2e): VOP3 clamp and mul:2/mul:4/div:2 do nothing on these integer results.
+        for op in ("v_cvt_u16_f16", "v_cvt_i16_f16"):
+            for value in (0x4500, 0xC000, 0x3800):   # 5.0, -2.0, 0.5
+                plain = run_ps([f"v_mov_b32 v0, {value:#x}", f"{op} v0, v0", "exp mrt0 v0, v0, v0, v0 done vm", "s_endpgm"])
+                for mod in ("clamp", "mul:2", "clamp div:2"):
+                    with self.subTest(op=op, value=hex(value), mod=mod):
+                        words = run_ps([f"v_mov_b32 v0, {value:#x}", f"{op} v0, v0 {mod}",
+                                        "exp mrt0 v0, v0, v0, v0 done vm", "s_endpgm"])
+                        self.assertEqual(words, plain)
+
+    def test_f16_to_int16_unknown_modifiers_still_rejected(self):
         for op in ("v_cvt_u16_f16", "v_cvt_i16_f16"):
             with self.subTest(op=op), self.assertRaises(rdna2spirv.Unsupported):
-                translate_lines("ps_cvt_f16_reject", [f"{op} v0, v0 clamp", "exp mrt0 v0, v0, v0, v0 done vm", "s_endpgm"])
+                translate_lines("ps_cvt_f16_reject", [f"{op}_e32 v0, v0 clamp", "exp mrt0 v0, v0, v0, v0 done vm", "s_endpgm"])
 
 
 if __name__ == "__main__":
