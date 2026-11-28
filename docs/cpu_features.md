@@ -65,6 +65,9 @@ in the image.
   (6 + 4 sites) jumps to a stub within 2 GiB of the image that zeroes the line with eight 8-byte stores and keeps the
   loop's registers and flags. Same boot afterwards: 164,946 PresentX in 300 s against 869 in 420 s, no CLZERO left on
   the #UD path. `LEONIDA_CLZERO_PATCH=0` keeps the emulation; `clzero_patch_test` runs both shapes on any CPU.
+- CLWB is rewritten in place at its first #UD (`runtime/src/cpu_emulation.h`): `66 0F AE /6` becomes CLFLUSHOPT
+  (`66 0F AE /7`, same operand and length), or on a host without CLFLUSHOPT a NOP of the same length, so each site
+  takes the #UD once. `LEONIDA_CLWB_PATCH=0` keeps emulating every execution instead.
 - The CPUID sites see the host's vendor, family and features, not the console's. What the game does with the
   answers is not measured here.
 
