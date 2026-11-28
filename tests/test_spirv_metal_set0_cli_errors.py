@@ -73,8 +73,8 @@ class CliErrorTest(unittest.TestCase):
 
     def test_spirv_as_that_fails(self):
         lines = self.assert_failed(self.run_tool(sys.executable, sys.executable))
-        # spirv-as writes to the terminal itself; the tool's own line comes last.
-        self.assertEqual(lines[-1], f"ERROR: {sys.executable} failed with exit status 2")
+        # The tool captures spirv-as's stderr and names its first line after the exit status; its line comes last.
+        self.assertTrue(lines[-1].startswith(f"ERROR: {sys.executable} failed with exit status 2: "), lines[-1])
         self.assertEqual([line for line in lines if line.startswith("ERROR: ")], lines[-1:])
 
     def test_usage_and_layout_still_work_through_cli(self):

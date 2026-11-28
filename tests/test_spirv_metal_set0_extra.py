@@ -343,7 +343,7 @@ def _make_fake_spirv_tools(dis_name="spirv-dis", asm_name="spirv-as"):
     """Return a subprocess.run replacement backed by the synthetic SPIR-V binary codec."""
     calls: list[list[str]] = []
 
-    def fake_run(cmd, check=False, capture_output=False, text=False, input=None, errors=None):
+    def fake_run(cmd, check=False, capture_output=False, text=False, input=None, errors=None, encoding=None):
         calls.append(list(cmd))
         exe = cmd[0]
         if exe == dis_name:
@@ -699,7 +699,8 @@ OpDecorate %orphan Binding 1
                 self.assertIn("%bad", str(ctx.exception))
                 self.assertIn(f"binding {b}", str(ctx.exception))
 
-    def test_missing_uint32_type_raises_when_runtime_array_rewritten(self):
+    def test_missing_uint32_type_is_synthesized_when_runtime_array_rewritten(self):
+        # Since SHADER-METAL-SET0-FIX the rewrite declares a 32-bit uint for the array length instead of stopping.
         base = """\
 OpDecorate %images DescriptorSet 0
 OpDecorate %images Binding 0
@@ -716,9 +717,11 @@ OpDecorate %images Binding 0
             ("unsigned_64", "%u64 = OpTypeInt 64 0"),
         ):
             with self.subTest(case=label):
-                with self.assertRaises(SystemExit) as ctx:
-                    m.rewrite(base.format(int_decl=int_decl), [4096])
-                self.assertIn("no 32-bit uint type", str(ctx.exception))
+                out = m.rewrite(base.format(int_decl=int_decl), [4096])
+                out = out if isinstance(out, str) else out[0]
+                self.assertIn("%msl_uint = OpTypeInt 32 0", out)
+                self.assertIn("= OpConstant %msl_uint 4096", out)
+                self.assertLess(out.index("%msl_uint = OpTypeInt 32 0"), out.index("= OpConstant %msl_uint 4096"))
 
 
 class TestMainAndCli(unittest.TestCase):
@@ -904,7 +907,7 @@ class TestMainAndCli(unittest.TestCase):
                 disasm = header_text + "OpCapability Shader\n"
                 seen_cmds = []
 
-                def run_stub(cmd, check=False, capture_output=False, text=False, input=None, errors=None):
+                def run_stub(cmd, check=False, capture_output=False, text=False, input=None, errors=None, encoding=None):
                     seen_cmds.append((list(cmd), check, capture_output, text, input))
                     if len(seen_cmds) == 1:
                         return subprocess.CompletedProcess(cmd, 0, disasm, "")
