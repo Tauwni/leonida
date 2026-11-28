@@ -438,7 +438,7 @@ class SamplerSourceCensus(unittest.TestCase):
             ("s_add_u32 s10, s10, 0x7fff0000", 8),
             ("s_mov_b32 s11, 0", 4),
             ("s_load_dwordx8 s[20:27], s[10:11], 0x800", 8),
-            ("s_lshl3_add_u32 s8, s8, 0x30", 4),
+            ("s_lshl3_add_u32 s8, 6, s8", 4),
             ("s_mov_b32 s9, 0", 4),
             ("s_load_dwordx4 s[28:31], s[8:9], 0x10", 8),
             SAMPLE, END,
