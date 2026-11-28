@@ -597,8 +597,11 @@ jobs:
         shell: bash
         env:
           # ps_ssharp: #1845 (the S#'s LOD bias, which a Metal sampler can't take).
+          # ps_exp_f32_denorm_rt: wrong on the runner's Apple Paravirtual device (MoltenVK 1.4.2): pixel 0 reads
+          # 16777214 where 16777216 is expected; exact on an Apple M3 with MoltenVK 1.4.2 (3 of 3 runs).
           EXPECTED_FAILURES: >-
             ps_ssharp
+            ps_exp_f32_denorm_rt
         run: |
           set +e
           python3 -I scripts/run_gpu_tests.py --build runtime/build --llvm-mc "$LLVM_MC" --work "$RUNNER_TEMP/gpu" 2>&1 |
